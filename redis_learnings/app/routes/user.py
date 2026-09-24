@@ -1,4 +1,4 @@
-from fastapi import APIRouter,Depends,HTTPException
+from fastapi import APIRouter,Depends,HTTPException,status
 from app.models.user import User
 from app.schemas.user import UserCreate,UserRead,UserUpdate
 from sqlalchemy.orm import Session
@@ -6,6 +6,7 @@ from app.database import get_db
 from app.redis_client import redis_client
 from app.dependencies.rate_limiter import rate_limit
 import json
+from app.dependencies.auth import get_current_user
 
 router = APIRouter(
     prefix="/user",
@@ -27,7 +28,7 @@ def create_user(user:UserCreate,db:Session=Depends(get_db)):
 
 
 @router.get("/{id}",response_model=UserRead)
-def get_user(id:int,db:Session=Depends(get_db)):
+def get_user(id:int,db:Session=Depends(get_db),Current=Depends(get_current_user)):
     cache_key=f"user:{id}"
     print("Checking Redis...")
     cached_user=redis_client.get(cache_key)
@@ -37,14 +38,22 @@ def get_user(id:int,db:Session=Depends(get_db)):
        return json.loads(cached_user)
     print("Cache Miss")
     print("Fetching from PostgreSQL")
+
+    
     user=db.query(User).where(User.id==id).first()
+    if not user:
+       raise HTTPException(
+          status_code=status.HTTP_404_NOT_FOUND,
+          detail="user not found"
+       )
+    
     ans=UserRead.model_validate(user).model_dump()
-    redis_client.set( cache_key,json.dumps(ans))
+    redis_client.set(cache_key,json.dumps(ans),ex=60)
 
 
-    return user
+    return ans
 
- 
+
  
 
 @router.put("/{id}")

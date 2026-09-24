@@ -7,7 +7,7 @@ class UserBase(BaseModel):
     email:EmailStr
 
 class UserCreate(UserBase):
-    pass
+    password:str
 
 class UserRead(UserBase):
     id:int

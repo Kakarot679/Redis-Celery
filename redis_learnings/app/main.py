@@ -5,7 +5,7 @@ from app.models.user import User
 from app.routes.banner import router as banner_router
 from app.routes.user import router as user_router
 from app.routes.rate_limit import router as rate_router
-
+from app.routes.auth import router as api_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -13,6 +13,7 @@ app=FastAPI()
 app.include_router(banner_router)
 app.include_router(user_router)
 app.include_router(rate_router)
+app.include_router(api_router)
 
 # @app.on_event("startup")
 # def startup():

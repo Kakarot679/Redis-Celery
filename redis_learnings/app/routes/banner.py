@@ -41,7 +41,7 @@ def exist_banner():
 
 
 
-@router.post("/user")
+@router.post("/hash-user")
 def create_user():
     redis_client.hset(
         "user:1",
@@ -56,7 +56,7 @@ def create_user():
         "user":"user_created"
     }
 
-@router.get("/user")
+@router.get("/hash-user")
 def get_user():
     user=redis_client.hgetall("user:1")
 
