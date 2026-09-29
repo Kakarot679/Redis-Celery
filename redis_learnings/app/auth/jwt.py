@@ -30,3 +30,16 @@ def verify_token(token: str):
         SECRET_KEY,
         algorithms=[ALGORITHM]
     )
+
+def create_refresh_token(data:dict):
+    payload=data.copy()
+    expire=datetime.now(timezone.utc)+timedelta(days=7)
+    payload.update({"exp":expire})
+
+    token=jwt.encode(
+        payload,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    return token

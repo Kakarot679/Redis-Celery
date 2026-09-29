@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column,Integer,String
+from sqlalchemy import Column,Integer,String,Boolean
 
 class User(Base):
     __tablename__="users"
@@ -9,3 +9,4 @@ class User(Base):
     city=Column(String)
     email=Column(String,unique=True)
     password=Column(String)
+    is_verified=Column(Boolean,default=False)

@@ -7,6 +7,7 @@ from app.redis_client import redis_client
 from app.dependencies.rate_limiter import rate_limit
 import json
 from app.dependencies.auth import get_current_user
+from app.core.security import hash_password
 
 router = APIRouter(
     prefix="/user",
@@ -18,7 +19,18 @@ router = APIRouter(
 @router.post("/" ,response_model=UserRead)
 def create_user(user:UserCreate,db:Session=Depends(get_db)):
  
- new_user=User(**user.model_dump())
+
+
+ data=user.model_dump()
+ dp_email=db.query(User).filter(User.email==user.email).first()
+
+ if dp_email is not None:
+    raise HTTPException(
+       status_code=status.HTTP_400_BAD_REQUEST,
+       detail="Email already registered"
+    )
+ data["password"]=hash_password(data["password"])
+ new_user=User(**data)
  db.add(new_user)
  db.commit()
  db.refresh(new_user)
@@ -29,6 +41,9 @@ def create_user(user:UserCreate,db:Session=Depends(get_db)):
 
 @router.get("/{id}",response_model=UserRead)
 def get_user(id:int,db:Session=Depends(get_db),Current=Depends(get_current_user)):
+
+    if Current["user"].id!=id:
+       raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Not Authorized")
     cache_key=f"user:{id}"
     print("Checking Redis...")
     cached_user=redis_client.get(cache_key)
@@ -58,7 +73,10 @@ def get_user(id:int,db:Session=Depends(get_db),Current=Depends(get_current_user)
 
 @router.put("/{id}")
 def update_user(
-   id:int,user:UserUpdate,db:Session=Depends(get_db)):
+   id:int,user:UserUpdate,db:Session=Depends(get_db),Current=Depends(get_current_user)):
+
+    if Current["user"].id!=id:
+       raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Not Authorized")
 
     to_update=db.query(User).where(User.id==id).first()
     if not to_update:
