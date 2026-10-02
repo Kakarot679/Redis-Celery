@@ -48,3 +48,8 @@ def get_current_user(
         "user":user,
         "session_id":session_id
     }
+
+def require_admin(current=Depends(get_current_user)):
+    if current["user"].role!="admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Admin Access Required")
+    return current["user"]

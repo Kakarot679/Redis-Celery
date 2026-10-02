@@ -6,6 +6,7 @@ from app.routes.banner import router as banner_router
 from app.routes.user import router as user_router
 from app.routes.rate_limit import router as rate_router
 from app.routes.auth import router as api_router
+from app.routes.google_auth import router as google_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -14,6 +15,7 @@ app.include_router(banner_router)
 app.include_router(user_router)
 app.include_router(rate_router)
 app.include_router(api_router)
+app.include_router(google_router)
 
 # @app.on_event("startup")
 # def startup():

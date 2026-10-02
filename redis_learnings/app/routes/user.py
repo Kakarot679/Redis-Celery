@@ -6,7 +6,7 @@ from app.database import get_db
 from app.redis_client import redis_client
 from app.dependencies.rate_limiter import rate_limit
 import json
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import get_current_user,require_admin
 from app.core.security import hash_password
 
 router = APIRouter(
@@ -36,6 +36,14 @@ def create_user(user:UserCreate,db:Session=Depends(get_db)):
  db.refresh(new_user)
 
  return new_user
+
+
+
+@router.get("/admin",response_model=list[UserRead])
+def get_users(db:Session=Depends(get_db),current_admin: User=Depends(require_admin)):
+   users=db.query(User).all()
+
+   return users
 
 
 
@@ -75,7 +83,7 @@ def get_user(id:int,db:Session=Depends(get_db),Current=Depends(get_current_user)
 def update_user(
    id:int,user:UserUpdate,db:Session=Depends(get_db),Current=Depends(get_current_user)):
 
-    if Current["user"].id!=id:
+    if Current["user"].id!=id and Current["user"].role!="admin":
        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Not Authorized")
 
     to_update=db.query(User).where(User.id==id).first()
@@ -86,11 +94,14 @@ def update_user(
        setattr(to_update,key,value)
 
 
-    
-
     db.commit()
     db.refresh(to_update)
     redis_client.delete(f"user:{id}")
-    return to_update
+    return {
+       "message":"updated successfully"
+    }
 
-   
+
+
+
+

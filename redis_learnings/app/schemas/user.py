@@ -1,4 +1,5 @@
-from pydantic import BaseModel,EmailStr
+from pydantic import BaseModel,EmailStr,Field
+from app.models.user import UserRole
 
 
 class UserBase(BaseModel):
@@ -7,9 +8,10 @@ class UserBase(BaseModel):
     email:EmailStr
 
 class UserCreate(UserBase):
-    password:str
+    password:str=Field(min_length=8)
 
 class UserRead(UserBase):
+    role:UserRole
     id:int
     is_verified:bool
 
