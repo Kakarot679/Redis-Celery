@@ -166,7 +166,68 @@ def rate_limit(request: Request):
 
 ---
 
-## 7. Common Interview Questions
+## 7. Redis Pub/Sub
+- **What it is:** Live broadcast, zero persistence. `PUBLISH channel msg` sends now; `SUBSCRIBE channel` means "notify me of anything published from this moment on."
+- **Core limitation:** if nobody is subscribed when you publish, the message is gone forever — no storage, no replay, no memory. Proven live: `PUBLISH news "x"` with no subscriber returns `(integer) 0`, and re-subscribing afterward never shows that message.
+- **Fan-out, not work-split:** every subscriber receives every message. If 5 processes all subscribe to the same channel, all 5 react to every event — correct for broadcast use cases, wrong for "divide the work across workers" (causes duplicate processing, e.g. 5 duplicate emails per registration).
+- **When Pub/Sub is still the right tool:** anything where only the *latest* value matters and missing old ones is fine — "user is typing" indicators, live cursor position in collaborative editing, "refresh your dashboard" signals. Persisting these would be pure overhead.
+- **Commands:**
+  - `PUBLISH channel message` → returns number of subscribers that received it.
+  - `SUBSCRIBE channel` → blocks, prints `("subscribe", channel, n)` then `("message", channel, data)` for each arrival.
+- **Python (redis-py):**
+```python
+pubsub = redis_client.pubsub()
+pubsub.subscribe("news")
+for message in pubsub.listen():
+    if message["type"] == "message":
+        print(message["data"])
+```
+`pubsub.listen()` also yields a `"subscribe"` confirmation event first — filter on `message["type"] == "message"` to skip it.
+- **Real use case built in this project:** `create_user` originally published `{"email","name"}` as JSON on a `"new_registration"` channel; a standalone `subscriber.py` script subscribed and called `send_email(...)` — demonstrates decoupling (the registration route never calls `send_email` directly, doesn't know or care if anything's listening). Later replaced with Streams (see below) once reliability mattered.
+
+---
+
+## 8. Redis Streams
+- **What it is:** A durable, ordered, appendable log — fixes Pub/Sub's "miss it and it's gone" problem by actually storing entries in Redis.
+- **Core commands:**
+  - `XADD stream * field value ...` → append an entry; `*` auto-generates an ID (`<ms-timestamp>-<sequence>`). Returns the ID.
+  - `XRANGE stream - +` → read entries in a range (`-` = earliest, `+` = latest). Good for browsing/debugging, not how a worker normally reads.
+  - `XLEN stream` → count of entries.
+  - `XTRIM` / `XADD ... MAXLEN n` → cap stream size (memory management — streams never expire on their own like TTL'd keys do).
+- **Consumer groups — what turns a log into a reliable job queue:**
+  - `XGROUP CREATE stream group 0` → create a group reading from the start (`0`), or `$` for "only new entries from now." `mkstream=True` (Python) also creates the stream if missing.
+  - `XREADGROUP GROUP group consumer COUNT n STREAMS stream >` → read as a named consumer within a group; `>` means "give me entries not yet delivered to this group." **Each entry goes to exactly one consumer in the group — never duplicated**, even if multiple consumers call this concurrently. Proven live: `consumer1` read 3 entries, `consumer2` immediately after got `(nil)`.
+  - `XACK stream group entry_id` → consumer confirms it finished processing; clears the entry from "pending."
+  - `XPENDING stream group` → list entries delivered but not yet acknowledged, and which consumer owns each.
+  - `XCLAIM stream group new_consumer min_idle_ms entry_id` → reassign a pending entry to a different consumer (crash recovery). Proven live: claimed an entry from `consumer1` to `consumer2`, confirmed via `XPENDING` that ownership transferred, then `XACK`'d it to close it out.
+- **Consumer name is just a string** — not a pre-registered entity. "Running more workers" means running more copies of the same script with a different consumer-name string (e.g. `worker1`, `worker2`), not defining multiple consumers inside one script.
+- **Python (redis-py):**
+```python
+try:
+    redis_client.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
+except Exception:
+    pass  # group already exists
+
+while True:
+    entries = redis_client.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=10, block=5000)
+    if not entries:
+        continue
+    for stream_name, messages in entries:
+        for entry_id, fields in messages:
+            # process fields (a plain dict, already structured — no json.dumps needed, unlike Pub/Sub)
+            redis_client.xack(STREAM, GROUP, entry_id)
+```
+- **No `json.dumps` needed:** unlike `PUBLISH` (which only sends one plain string, forcing manual JSON packing), `XADD` natively stores a dict of named fields — `redis_client.xadd("registrations", {"email": e, "name": n})` stores `email`/`name` as real separate fields.
+- **Pub/Sub vs Streams, concretely (100 registrations, 5 workers):**
+  - Pub/Sub: all 5 workers receive all 100 events → 500 emails sent (5 duplicates per user), and any event during worker downtime is lost forever.
+  - Streams + group: the 100 entries are divided across the 5 workers (~20 each) → 100 emails sent total, and any entries from downtime remain queued until a worker comes back online.
+- **What a production worker needs beyond this toy version:** retry logic using `XPENDING`/`XCLAIM` on a schedule (not just manual), error handling around the actual work (so one failure doesn't crash the whole loop), multiple real worker processes (not just one), process supervision (systemd/Docker/Kubernetes auto-restart), and logging/metrics. Frameworks like Celery build this hardening on top of a queue backend (can be Redis) so you don't hand-roll it.
+- **Real use case built in this project:** replaced the Pub/Sub registration flow — `create_user` now does `XADD` to a `"registrations"` stream; `subscriber.py` is a real worker using `XREADGROUP`/`XACK`, surviving worker downtime without losing any registrations (the actual point of switching).
+- **Crash recovery is real code, not just a CLI exercise:** `subscriber.py` calls `XAUTOCLAIM` at the top of every loop iteration — `redis_client.xautoclaim(STREAM, GROUP, CONSUMER, min_idle_time=MIN_IDLE_MS, start_id="0-0")` finds any entry pending longer than `MIN_IDLE_MS` (abandoned by a crashed consumer) and reassigns it to this consumer automatically, before checking for new work. `XAUTOCLAIM` combines `XPENDING` (find stale entries) + `XCLAIM` (reassign) into one call. Without this, Redis does **not** auto-recover abandoned entries — a plain `xreadgroup(..., ">")` loop on a different worker will never see them, since `>` only returns entries never yet delivered to anyone in the group.
+
+---
+
+## 9. Common Interview Questions
 1. Why is Redis fast despite being single-threaded?
 2. Difference between cache-aside, write-through, and write-behind caching.
 3. How would you design a rate limiter with Redis? (fixed window vs sliding window)
@@ -177,10 +238,16 @@ def rate_limit(request: Request):
 8. What happens if two requests hit `INCR` at the exact same time — is there a race condition?
 9. How do you invalidate cache on updates, and what's the risk of stale cache?
 10. What's the difference between List, Set, and Sorted Set — and when would you pick each?
+11. Pub/Sub vs Streams — what's the fundamental difference, and when would you pick each?
+12. If you run multiple subscribers on the same Pub/Sub channel, what happens — and why is that wrong for a job-queue use case?
+13. How does a Redis Stream consumer group guarantee each entry is processed exactly once across multiple workers?
+14. What happens if a consumer reads an entry via `XREADGROUP` but crashes before calling `XACK`? How do you recover it?
+15. Why doesn't `XADD` need `json.dumps()` the way `PUBLISH` does?
+16. Why would you still choose Pub/Sub over Streams for something like a "user is typing" indicator?
 
 ---
 
-## 8. Common Mistakes
+## 10. Common Mistakes
 - Forgetting to set TTL → cache entries live forever, causing stale data / memory bloat.
 - Setting `EXPIRE` on every request in a rate limiter → window never actually resets (sliding, not fixed).
 - Storing Python objects directly without `json.dumps()` → Redis client errors or stores garbage.
@@ -188,3 +255,7 @@ def rate_limit(request: Request):
 - Using `KEYS *` in production → blocks the single-threaded server (use `SCAN` instead).
 - Treating Redis as a primary durable database without understanding persistence trade-offs (RDB/AOF).
 - Not namespacing keys (e.g. `user:{id}`, `rate_limit:{ip}`) → key collisions across features.
+- Using Pub/Sub for anything that must not be lost (job processing, financial events) → no persistence, silent data loss if no subscriber is connected at publish time.
+- Running multiple Pub/Sub subscribers expecting them to split work → they don't; every subscriber gets every message (use Streams + consumer group instead).
+- Letting a Stream grow forever without `MAXLEN`/`XTRIM` → unbounded memory growth (Redis is in-memory; nothing expires automatically like a TTL'd key).
+- Never checking `XPENDING` in a real worker → crashed/stuck consumers' entries sit unprocessed forever with no recovery.

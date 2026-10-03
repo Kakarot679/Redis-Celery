@@ -34,6 +34,7 @@ def create_user(user:UserCreate,db:Session=Depends(get_db)):
  db.add(new_user)
  db.commit()
  db.refresh(new_user)
+ redis_client.xadd("registrations",{"email":new_user.email,"name":new_user.name})
 
  return new_user
 
