@@ -11,6 +11,7 @@ from app.redis_client import redis_client
 from app.dependencies.auth import get_current_user
 import random
 from app.utils.email import send_email
+from app.celery_app import send_reset_email_task
 from fastapi.responses import HTMLResponse
 
 router=APIRouter(
@@ -22,7 +23,8 @@ router=APIRouter(
 @router.post("/login")
 def login(email:str,password:str,db:Session=Depends(get_db)):
     fail_key=f"login_fail:{email}"
-    if redis_client.get(fail_key) and int(redis_client.get(fail_key)) >= 5:
+    cache=redis_client.get(fail_key)
+    if cache and int(cache) >= 5:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed login attempts. Try again later."
@@ -52,38 +54,39 @@ def login(email:str,password:str,db:Session=Depends(get_db)):
             detail="Invalid Credentials"
         )
 
-    redis_client.delete(fail_key)
-        
-    
+    # --- Previous approach: 3 separate Redis round-trips (delete + set + set) ---
+    # redis_client.delete(fail_key)
+    # session_id=str(uuid.uuid4())
+    # redis_client.set(
+    #     f"session:{session_id}",
+    #     json.dumps({"user_id":user.id}),
+    #     ex=1800
+    # )
+    # access_token=create_access_token({"user_id":user.id,"session_id":session_id})
+    # refresh_token=create_refresh_token({"user_id":user.id,"session_id":session_id})
+    # redis_client.set(
+    #     f"refresh:{session_id}",
+    #     refresh_token,
+    #     ex=7 * 24 * 60 * 60
+    # )
 
     session_id=str(uuid.uuid4())
-    redis_client.set(
-        f"session:{session_id}",
-      json.dumps( {   "user_id":user.id,
-            
-       }),ex=1800
-        
-    )
-
     access_token=create_access_token(
-
         {
             "user_id":user.id,
             "session_id":session_id
         })
     refresh_token=create_refresh_token(
-
         {
             "user_id":user.id,
             "session_id":session_id
-
         })
 
-    redis_client.set(
-        f"refresh:{session_id}",
-        refresh_token,
-        ex=7 * 24 * 60 * 60
-    )
+    pipe = redis_client.pipeline()
+    pipe.delete(fail_key)
+    pipe.set(f"session:{session_id}", json.dumps({"user_id": user.id}), ex=1800)
+    pipe.set(f"refresh:{session_id}", refresh_token, ex=7 * 24 * 60 * 60)
+    pipe.execute()
 
     return{
         "access_token":access_token,
@@ -146,6 +149,7 @@ async def send_otp(email:str):
         "Your verification code",
         f"Your OTP is {otp}. It expires in 5 minutes."
     )
+
 
     return{
         "message":"otp generated and sent to your email"
@@ -220,11 +224,7 @@ async def forgot_password(
         f"http://127.0.0.1:8000/auth/reset-password"
         f"?token={reset_token}"
     )
-    await send_email(
-        user.email,
-        f"Reset your password",
-        f"Click this link to reset your password:\n\n{reset_link}"
-    )
+    send_reset_email_task.delay(user.email,reset_link)
     return {
         "message": "If an account exists, a reset email has been sent."
     }
@@ -236,6 +236,7 @@ from fastapi.responses import HTMLResponse
 
 @router.get("/reset-password", response_class=HTMLResponse)
 def reset_password_page(token: str):
+    
     safe_token = html.escape(token)
     return f"""
     <html>

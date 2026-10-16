@@ -8,6 +8,34 @@ services:
     volumes:
       - redis_data:/data
 
+  # --- Previous attempt: incomplete (missing spaces after colons, missing cluster flags, missing ports) ---
+  # redis-node-1:
+  #   image:redis:alpine
+  #   container_name:redis_node_1
+  #   command:[
+  #   "redis"]
+
+  redis-node-1:
+    image: redis:alpine
+    container_name: redis_node_1
+    command: ["redis-server", "--port", "7000", "--cluster-enabled", "yes", "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000"]
+    ports:
+      - "7000:7000"
+
+  redis-node-2:
+    image: redis:alpine
+    container_name: redis_node_2
+    command: ["redis-server", "--port", "7001", "--cluster-enabled", "yes", "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000"]
+    ports:
+      - "7001:7001"
+
+  redis-node-3:
+    image: redis:alpine
+    container_name: redis_node_3
+    command: ["redis-server", "--port", "7002", "--cluster-enabled", "yes", "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000"]
+    ports:
+      - "7002:7002"
+
   postgres:
     image: postgres:16-alpine
     container_name: postgres_store

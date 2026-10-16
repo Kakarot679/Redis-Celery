@@ -1,7 +1,89 @@
-from fastapi import APIRouter
+import time
+import uuid
+import redis
+from fastapi import APIRouter, HTTPException
 from ..redis_client import redis_client
 
 router = APIRouter()
+
+_release_lock_script = redis_client.register_script("""
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0
+end
+""")
+
+
+@router.post("/lock/acquire")
+def acquire_lock():
+    owner = str(uuid.uuid4())
+    acquired = redis_client.set("lock:daily_digest", owner, nx=True, ex=30)
+    if not acquired:
+        raise HTTPException(409, "Lock already held by someone else")
+    return {"message": "Lock acquired", "owner": owner}
+
+
+@router.post("/lock/release")
+def release_lock(owner: str):
+    result = _release_lock_script(keys=["lock:daily_digest"], args=[owner])
+    if result == 0:
+        raise HTTPException(409, "Not your lock (expired or already released)")
+    return {"message": "Lock released"}
+
+
+@router.post("/send-daily-digest")
+def send_daily_digest():
+    owner = str(uuid.uuid4())
+    acquired = redis_client.set("lock:daily_digest", owner, nx=True, ex=30)
+    if not acquired:
+        return {"message": "Another server is already sending the digest, skipping"}
+
+    try:
+        # --- the actual protected work goes here ---
+        time.sleep(10)  # simulating "building and sending the digest email"
+        return {"message": "Digest sent"}
+    finally:
+        _release_lock_script(keys=["lock:daily_digest"], args=[owner])
+
+
+@router.post("/stock/init")
+def init_stock(quantity: int = 10):
+    redis_client.set("stock", quantity)
+    return {"stock": quantity}
+
+
+@router.post("/buy-unsafe")
+def buy_unsafe():
+    stock = int(redis_client.get("stock") or 0)
+    if stock <= 0:
+        raise HTTPException(400, "Out of stock")
+
+    time.sleep(2)  # artificial delay to make the race condition easy to trigger by hand
+
+    redis_client.set("stock", stock - 1)
+    return {"message": "Purchased", "remaining": stock - 1}
+
+
+@router.post("/buy-safe")
+def buy_safe():
+    with redis_client.pipeline() as pipe:
+        while True:
+            try:
+                pipe.watch("stock")
+                stock = int(pipe.get("stock") or 0)
+                if stock <= 0:
+                    pipe.unwatch()
+                    raise HTTPException(400, "Out of stock")
+
+                time.sleep(2)  # same artificial delay, to prove this version is safe under the same race window
+
+                pipe.multi()
+                pipe.set("stock", stock - 1)
+                pipe.execute()
+                return {"message": "Purchased", "remaining": stock - 1}
+            except redis.WatchError:
+                continue  # "stock" changed under us between watch() and execute() - retry from scratch
 
 
 @router.post("/banner")
